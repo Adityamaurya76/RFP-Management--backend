@@ -7,9 +7,7 @@ import RFP from "../models/rfp.model.js";
 let lastSeenUid = 0;
 
 export const startEmailListener = async () => {
-  console.log("🔄 Starting email listener...");
-  
-  // Check for new emails every 15 seconds
+  console.log("Starting email listener...");
   checkForNewEmails();
   setInterval(checkForNewEmails, 15000);
 };
@@ -32,7 +30,6 @@ const checkForNewEmails = async () => {
     const lock = await client.getMailboxLock("INBOX");
     
     try {
-      // Get all message UIDs
       const messages = [];
       for await (const message of client.fetch("1:*", { envelope: true, uid: true })) {
         messages.push(message);
@@ -42,25 +39,20 @@ const checkForNewEmails = async () => {
         console.log("📭 No emails in inbox");
         return;
       }
-
-      // Get the latest message
       const latestMessage = messages[messages.length - 1];
-      
-      // Initialize lastSeenUid on first run
+
       if (lastSeenUid === 0) {
         lastSeenUid = latestMessage.uid;
         console.log(`📬 Email listener ready. Watching for new emails (last UID: ${lastSeenUid})`);
         return;
       }
 
-      // Check for new messages
       const newMessages = messages.filter(m => m.uid > lastSeenUid);
       
       if (newMessages.length > 0) {
         console.log(`📨 ${newMessages.length} new email(s) detected!`);
         
         for (const msg of newMessages) {
-          // Fetch full message with body
           const fullMessage = await client.fetchOne(msg.seq.toString(), {
             source: true,
             envelope: true
@@ -79,7 +71,7 @@ const checkForNewEmails = async () => {
     }
     
   } catch (error) {
-    console.log("❌ IMAP Error:", error.message);
+    console.log("IMAP Error:", error.message);
   } finally {
     await client.logout();
   }
@@ -91,33 +83,73 @@ const processEmail = async (message) => {
     const vendorEmail = message.envelope.from?.[0]?.address;
     const subject = message.envelope.subject || "";
 
-    // Skip emails from our own system
     if (vendorEmail === process.env.IMAP_USER) {
-      console.log("⏭️ Skipping own email");
+      console.log("Skipping own email");
       return;
     }
 
-    console.log("📥 New Email From:", vendorEmail);
-    console.log("📋 Subject:", subject);
-    
-    // Parse email with AI
-    console.log("🤖 Parsing with AI...");
+    console.log("New Email From:", vendorEmail);
+    console.log("Subject:", subject);
+   
+    console.log("Parsing with AI...");
     const parsedData = await parseVendorEmail(emailBody);
-    console.log("🤖 AI Parsed Data:", JSON.stringify(parsedData, null, 2));
+    console.log("AI Parsed Data:", JSON.stringify(parsedData, null, 2));
 
-    // Find vendor
     const vendor = await Vendor.findOne({ email: vendorEmail });
 
-    // Find RFP from subject
     let rfp = null;
-    const rfpMatch = subject.match(/Request for Proposal:\s*(.+)/i);
+    let matchedTitle = null;
+
+    const rfpMatch = subject.match(/(?:Re:\s*)?Request for Proposal:\s*(.+)/i);
     if (rfpMatch) {
-      const title = rfpMatch[1].trim();
-      rfp = await RFP.findOne({ title: { $regex: title, $options: 'i' } });
-      console.log("📋 Matched RFP:", rfp?.title || "Not found");
+      matchedTitle = rfpMatch[1].trim();
     }
 
-    // Save proposal to database
+    if (vendorEmail && matchedTitle) {
+      const vendorsWithEmail = await Vendor.find({ email: vendorEmail });
+      if (vendorsWithEmail.length > 0) {
+        const vendorIds = vendorsWithEmail.map(v => v._id);
+        rfp = await RFP.findOne({ 
+          vendorsSent: { $in: vendorIds },
+          title: { $regex: matchedTitle, $options: 'i' },
+          createdAt: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }
+        }).sort({ createdAt: -1 });
+        if (rfp) {
+          console.log("Matched RFP by vendor + title:", rfp.title);
+        }
+      }
+    }
+
+    if (!rfp && vendorEmail) {
+      const vendorsWithEmail = await Vendor.find({ email: vendorEmail });
+      if (vendorsWithEmail.length > 0) {
+        const vendorIds = vendorsWithEmail.map(v => v._id);
+        rfp = await RFP.findOne({ 
+          vendorsSent: { $in: vendorIds },
+          createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }
+        }).sort({ createdAt: -1 });
+        if (rfp) {
+          console.log("Matched RFP by vendor (most recent):", rfp.title);
+        }
+      }
+    }
+    
+    if (!rfp && matchedTitle) {
+      const allMatchingRFPs = await RFP.find({ 
+        title: { $regex: `^${matchedTitle}$`, $options: 'i' }
+      }).sort({ createdAt: -1 });
+      
+      if (allMatchingRFPs.length > 0) {
+        rfp = allMatchingRFPs[0];
+        console.log("Matched RFP by title (most recent):", rfp.title);
+        console.log(`Found ${allMatchingRFPs.length} RFPs with same title, using most recent`);
+      }
+    }
+    
+    if (!rfp) {
+      console.log("Could not match RFP for:", matchedTitle || subject);
+    }
+
     const proposal = await Proposal.create({
       vendorEmail,
       vendorName: vendor?.name || vendorEmail.split('@')[0],
@@ -127,9 +159,9 @@ const processEmail = async (message) => {
       parsedData,
     });
 
-    console.log("🟢 Proposal saved successfully! ID:", proposal._id);
+    console.log("Proposal saved successfully! ID:", proposal._id);
 
   } catch (err) {
-    console.log("❌ Email Processing Error:", err.message);
+    console.log("Email Processing Error:", err.message);
   }
 };

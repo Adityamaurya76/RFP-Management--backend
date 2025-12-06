@@ -141,8 +141,24 @@ const getProposalsByRFP = asyncHandler(async (req, res) => {
   if (!rfp) {
     throw new ApiError(404, "RFP not found");
   }
+  const mongoose = (await import('mongoose')).default;
+  let query = {};
   
-  const proposals = await Proposal.find({ rfpId }).sort({ createdAt: -1 });
+  if (mongoose.Types.ObjectId.isValid(rfpId)) {
+    query = {
+      $or: [
+        { rfpId: new mongoose.Types.ObjectId(rfpId) },
+        { rfpId: rfpId.toString() },
+        { rfpId: rfp._id }
+      ]
+    };
+  } else {
+    query = { rfpId: rfpId };
+  }
+  
+  const proposals = await Proposal.find(query).sort({ createdAt: -1 });
+  
+  console.log(`📊 Found ${proposals.length} proposals for RFP: ${rfp.title} (${rfpId})`);
   
   return res.status(200).json(new ApiResponse(200, proposals, "Proposals fetched successfully"));
 });
